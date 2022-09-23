@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	Host = "0.0.0.0"
+    Host = "0.0.0.0"
 	Port = "13337"
 	Type = "tcp"
 )
