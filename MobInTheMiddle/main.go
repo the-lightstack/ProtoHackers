@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"regexp"
+	"strings"
 )
 
 const (
@@ -17,7 +18,26 @@ const (
 	RemoteChatServerPort   = 16963
 	RemoteChatServerDomain = "chat.protohackers.com"
 	FakeBogusCoinAddress   = "7YWHMfk9JZe0LM0g1ZauHuiSxhI"
+	RegexPattern           = `^7[[:alnum:]]{25,35}$`
 )
+
+func ReplaceAddress(msg string) string {
+	re := regexp.MustCompile(RegexPattern)
+
+	if len(msg) > 0 {
+		msg = msg[:len(msg)-1]
+	}
+
+	// Split
+	parts := strings.Split(msg, " ")
+	for i, p := range parts {
+		if re.MatchString(p) {
+			parts[i] = FakeBogusCoinAddress
+		}
+	}
+
+	return strings.Join(parts, " ") + "\n"
+}
 
 func ReadMessage(conn net.Conn, buf *[]byte) error {
 	oneByteBuf := make([]byte, 1)
@@ -37,129 +57,69 @@ func ReadMessage(conn net.Conn, buf *[]byte) error {
 	return errors.New("message too long")
 }
 
-// Writes to the server_send pipe after applying regex
-// on bogus coin address and replacing it
-func handleClientRead(conn net.Conn, serverSend chan string, exit chan int) {
+func handleClientToServer(clientConn net.Conn, serverConn net.Conn) {
+	// Always read from clientConn, replace and then write to server Conn
 	for {
-		select {
-		case n := <-exit:
-			exit <- n + 1
+		tempBuf := make([]byte, 0)
+		err := ReadMessage(clientConn, &tempBuf)
+		if err != nil {
+			log.Println("ERROR: cant read from client")
+			clientConn.Close()
+			serverConn.Close()
 			return
-		default:
-			buf := make([]byte, 0)
-			err := ReadMessage(conn, &buf)
-			if err != nil {
-				log.Println("Error receiving from client")
-				exit <- 0
-				return
-			}
-
-			log.Printf("Got from Client: %s", buf)
-			re := regexp.MustCompile(`(^[[:space:]]?7[[:alnum:]]{25,35})|(7[[:alnum:]]{25,35})[[:space:]]?$`)
-			fake := re.ReplaceAllString(string(buf), FakeBogusCoinAddress)
-
-			serverSend <- string(fake)
 		}
 
-	}
-}
+		// Replace
+		replacedMsg := ReplaceAddress(string(tempBuf))
 
-func handleClientSend(conn net.Conn, clientSend chan string, exit chan int) {
-	// Reads from "clientSend" and relays it
-	for {
-		select {
-		case n := <-exit:
-			select {
-			case msg := <-clientSend:
-				log.Println("SENDING SPECIAL SHIT TO **CLIENT** FROM DEAD CODE!!!")
-
-				_, err := conn.Write([]byte(msg))
-				if err != nil {
-					log.Println("Sending to client failed :shrug:")
-
-				}
-				exit <- n + 1
-				return
-			default:
-				exit <- n + 1
-				return
-
-			}
-		default:
-			msg := <-clientSend
-			log.Printf("Sending to Client: %s", string(msg))
-
-			_, err := conn.Write([]byte(msg))
-			if err != nil {
-				log.Println("Sending to client failed :shrug:")
-				exit <- 0
-				return
-			}
+		if len(replacedMsg) > 0 && replacedMsg[len(replacedMsg)-1] != '\n' {
+			replacedMsg += "\n"
 		}
+		log.Print(replacedMsg)
 
-	}
-}
-
-func handleChatServerSend(chatServerConn net.Conn, sendToServer chan string, exit chan int) {
-	for {
-		select {
-		case n := <-exit:
-			select {
-			case msg := <-sendToServer:
-
-				log.Println("SENDING SPECIAL SHIT TO SERVER FROM DEAD CODE!!!")
-				log.Printf("Sending to server: %s", string(msg))
-				_, err := chatServerConn.Write([]byte(msg))
-				if err != nil {
-					log.Println("Sending to server failed")
-				}
-				exit <- n + 1
-				return
-			default:
-				exit <- n + 1
-				return
-			}
-
-		default:
-			msg := <-sendToServer
-			log.Printf("Sending to server: %s", string(msg))
-			_, err := chatServerConn.Write([]byte(msg))
-			if err != nil {
-				log.Println("Sending to server failed")
-				exit <- 0
-				return
-			}
-		}
-	}
-}
-
-func handleChatServerReceive(chatServerConn net.Conn, sendToUserChan chan string, exit chan int) {
-	for {
-		select {
-		case n := <-exit:
-			exit <- n + 1
+		// And relay to server
+		_, err = serverConn.Write([]byte(replacedMsg))
+		if err != nil {
+			log.Println("ERROR: cant write to server!")
+			clientConn.Close()
+			serverConn.Close()
 			return
+		}
+	}
+}
 
-		default:
-			buf := make([]byte, 0)
-			err := ReadMessage(chatServerConn, &buf)
-			if err != nil {
-				log.Println("Error receiving from ChatServer")
-				exit <- 0
-				return
-			}
-			log.Printf("Got from Server: %s", buf)
+func handleServerToClient(clientConn net.Conn, serverConn net.Conn) {
+	for {
+		// Read from server
+		tempBuf := make([]byte, 0)
+		err := ReadMessage(serverConn, &tempBuf)
+		if err != nil {
+			log.Println("ERROR: cant read from server")
+			clientConn.Close()
+			serverConn.Close()
+			return
+		}
 
-			re := regexp.MustCompile(`(^[[:space:]]?7[[:alnum:]]{25,35})|(7[[:alnum:]]{25,35})[[:space:]]?$`)
-			fake := re.ReplaceAllString(string(buf), FakeBogusCoinAddress)
+		// Replace
+		replacedMsg := ReplaceAddress(string(tempBuf))
 
-			sendToUserChan <- string(fake)
+		if len(replacedMsg) > 0 && replacedMsg[len(replacedMsg)-1] != '\n' {
+			replacedMsg += "\n"
+		}
+
+		log.Print(replacedMsg)
+		// And relay to client
+		_, err = clientConn.Write([]byte(replacedMsg))
+		if err != nil {
+			log.Println("ERROR: cant write to client!")
+			clientConn.Close()
+			serverConn.Close()
+			return
 		}
 	}
 }
 
 func handleIncomingConnection(clientConn net.Conn) {
-	defer clientConn.Close()
 
 	// Establish connection to real chat server
 	log.Printf("%s:%d", RemoteChatServerDomain, RemoteChatServerPort)
@@ -168,35 +128,25 @@ func handleIncomingConnection(clientConn net.Conn) {
 		log.Fatalf(err.Error())
 	}
 
+	// Making sure all connections get closed
+	defer clientConn.Close()
 	defer chatServerConn.Close()
 
-	// Just have 2 chans
-	sendToUserChan := make(chan string)
-	sendToServerChan := make(chan string)
+	go handleClientToServer(clientConn, chatServerConn)
+	go handleServerToClient(clientConn, chatServerConn)
 
-	// And one management chan to kill all go routines on closed conn
-	exit := make(chan int)
-
-	// Start all handlers
-	go handleClientRead(clientConn, sendToServerChan, exit)
-	go handleChatServerSend(chatServerConn, sendToServerChan, exit)
-	go handleChatServerReceive(chatServerConn, sendToUserChan, exit)
-	go handleClientSend(clientConn, sendToUserChan, exit)
-
-	// The "master" quits when the "exit" chan contains a number that is 3 or
-	// higher, meaning all handlers are dead
+	zeroBuf := make([]byte, 0)
 	for {
-		select {
-		case n := <-exit:
-			if n > 3 {
-				log.Println("========================================= quitting and closing conns")
-				return
-			} else {
-				exit <- n
-			}
+		_, err := chatServerConn.Read(zeroBuf)
+		if err != nil {
+			break
+		}
+
+		_, err = clientConn.Read(zeroBuf)
+		if err != nil {
+			break
 		}
 	}
-
 }
 
 func main() {
